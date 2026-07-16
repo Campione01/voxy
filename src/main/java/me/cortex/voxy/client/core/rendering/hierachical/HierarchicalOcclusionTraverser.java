@@ -373,7 +373,6 @@ public class HierarchicalOcclusionTraverser {
         //}
         if (count != 0) {
             var buffer = new MemoryBuffer(count*8L+8).cpyFrom(ptr-8);
-            //Write back the exact count into the new memory buffer (not the download stream buffer)
             MemoryUtil.memPutInt(buffer.address, count);
             this.nodeManager.submitRequestBatch(buffer);// the -8 is because we incremented it by 8
         }

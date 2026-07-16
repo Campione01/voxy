@@ -37,7 +37,7 @@ public class VoxelIngestService {
             var section = task.section;
             var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
 
-            if (section.hasOnlyAir() && task.blockLight == null && task.skyLight == null) {//If the chunk section has lighting data, propagate it
+            if (section.hasOnlyAir() && task.blockLight==null && task.skyLight==null) {//If the chunk section has lighting data, propagate it
                 WorldUpdater.insertUpdate(task.world, vs.zero());
             } else {
                 VoxelizedSection csec = WorldConversionFactory.convert(
@@ -51,7 +51,6 @@ public class VoxelIngestService {
                 WorldUpdater.insertUpdate(task.world, csec);
             }
         } finally {
-            //Release the ref we had acquired for the world
             task.world.releaseRef();
         }
     }
@@ -104,11 +103,11 @@ public class VoxelIngestService {
         var lightingProvider = chunk.getLevel().getLightEngine();
         boolean gotLighting = false;
 
-        int i = chunk.getMinSectionY() - 1;
+        int i = chunk.getMinSection() - 1;
         boolean allEmpty = true;
         for (var section : chunk.getSections()) {
             i++;
-            if (section == null || !shouldIngestSection(section, chunk.getPos().x(), i, chunk.getPos().z())) continue;
+            if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
             allEmpty&=section.hasOnlyAir();
             //if (section.isEmpty()) continue;
             var pos = SectionPos.of(chunk.getPos(), i);
@@ -119,17 +118,17 @@ public class VoxelIngestService {
 
         if (allEmpty&&!gotLighting) {
             //Special case all empty chunk columns, we need to clear it out
-            i = chunk.getMinSectionY() - 1;
+            i = chunk.getMinSection() - 1;
             for (var section : chunk.getSections()) {
                 i++;
-                if (section == null || !shouldIngestSection(section, chunk.getPos().x(), i, chunk.getPos().z())) continue;
+                if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
                 engine.acquireRef();
-                this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, null, null));
+                this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, null, null));
                 try {
                     this.service.execute();
                 } catch (Exception e) {
                     Logger.error("Executing had an error: assume shutting down, aborting",e);
-                    engine.releaseRef();//we must manually release
+                    engine.releaseRef();
                     break;
                 }
             }
@@ -143,10 +142,10 @@ public class VoxelIngestService {
         var slp = lightingProvider.getLayerListener(LightLayer.SKY);
 
 
-        i = chunk.getMinSectionY() - 1;
+        i = chunk.getMinSection() - 1;
         for (var section : chunk.getSections()) {
             i++;
-            if (section == null || !shouldIngestSection(section, chunk.getPos().x(), i, chunk.getPos().z())) continue;
+            if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
             //if (section.isEmpty()) continue;
             var pos = SectionPos.of(chunk.getPos(), i);
 
@@ -164,13 +163,13 @@ public class VoxelIngestService {
             //if (blNone && slNone) {
             //    continue;
             //}
-            engine.acquireRef();//This is not great but dont really have a better solution as all the others have there own problem
-            this.ingestQueue.add(new IngestSection(chunk.getPos().x(), i, chunk.getPos().z(), engine, section, bl, sl));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
+            engine.acquireRef();
+            this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, bl, sl));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
             try {
                 this.service.execute();
             } catch (Exception e) {
                 Logger.error("Executing had an error: assume shutting down, aborting",e);
-                engine.releaseRef();//we must manually release
+                engine.releaseRef();
                 break;
             }
         }
@@ -184,10 +183,8 @@ public class VoxelIngestService {
     public void shutdown() {
         this.service.shutdown();
         while (!this.ingestQueue.isEmpty()) {
-            //We need to manually release all our world locks
             this.ingestQueue.pop().world.releaseRef();
         }
-
     }
 
     //Utility method to ingest a chunk into the given WorldIdentifier or world
@@ -214,7 +211,7 @@ public class VoxelIngestService {
             return true;
         } catch (Exception e) {
             Logger.error("Executing had an error: assume shutting down, aborting",e);
-            engine.releaseRef();//we must manually release
+            engine.releaseRef();
             return false;
         }
     }

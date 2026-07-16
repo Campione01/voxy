@@ -5,8 +5,8 @@ import com.sun.jna.platform.win32.WinNT;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.ThreadUtils;
-import org.lwjgl.system.Platform;
 import oshi.SystemInfo;
+import org.lwjgl.system.Platform;
 
 import java.util.Arrays;
 import java.util.Random;
@@ -130,9 +130,10 @@ public class CpuLayout {
     static {
         Core[] cores = null;
         try {
-            if (Platform.get() == Platform.WINDOWS) {
+            var platform = Platform.get();
+            if (platform == Platform.WINDOWS) {
                 cores = generateCoreLayoutWindows();
-            } else if (Platform.get() == Platform.LINUX) {
+            } else if (platform == Platform.LINUX) {
                 cores = generateCoreLayoutLinux();
             }
         } catch (Exception e) {

@@ -4,22 +4,23 @@ import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
-import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
 
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.FileLock;
 import java.nio.channels.NonWritableChannelException;
 import java.util.HashSet;
-import java.util.function.Consumer;
-import java.util.function.Function;
 
-public class VoxyClient implements ClientModInitializer {
+@EventBusSubscriber(modid = "voxy", value = Dist.CLIENT)
+public class VoxyClient {
     private static final HashSet<String> FREX = new HashSet<>();
     private static FileLock EXCLUSIVE_LOCK;
+
     public static void initVoxyClient() {
         Capabilities.init();//Ensure clinit is called
 
@@ -50,7 +51,6 @@ public class VoxyClient implements ClientModInitializer {
         }
 
         if (systemSupported) {
-
             SharedIndexBuffer.INSTANCE.id();
 
             VoxyCommon.setInstanceFactory(VoxyClientInstance::new);
@@ -58,29 +58,17 @@ public class VoxyClient implements ClientModInitializer {
             if (!Capabilities.INSTANCE.subgroup) {
                 Logger.warn("GPU does not support subgroup operations, expect some performance degradation");
             }
-
         }
     }
 
-    @Override
-    public void onInitializeClient() {
-        DebugEntries.init();
-
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-            if (VoxyCommon.isAvailable()) {
-                dispatcher.register(VoxyCommands.register());
-            }
-        });
-
-        FabricLoader.getInstance()
-                .getEntrypoints("frex_flawless_frames", Consumer.class)
-                .forEach(api -> ((Consumer<Function<String,Consumer<Boolean>>>)api).accept(name->active->{if (active) {
-                    FREX.add(name);
-                } else {
-                    FREX.remove(name);
-                }}));
+    @SubscribeEvent
+    public static void onRegisterClientCommands(RegisterClientCommandsEvent event) {
+        if (VoxyCommon.isAvailable()) {
+            event.getDispatcher().register(VoxyCommands.register());
+        }
     }
 
+    // FREX entrypoint not supported on NeoForge — left as no-op stub.
     public static boolean isFrexActive() {
         return !FREX.isEmpty();
     }

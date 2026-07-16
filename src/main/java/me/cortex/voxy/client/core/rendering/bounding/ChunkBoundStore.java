@@ -10,134 +10,124 @@ import org.lwjgl.system.MemoryUtil;
 
 import static org.lwjgl.opengl.ARBDirectStateAccess.glCopyNamedBufferSubData;
 
-//This is a render subsystem, its very simple in what it does
-// it renders an AABB around loaded chunks, thats it
-public class ChunkBoundStore implements IBoundStore {
-    private static final int INIT_MAX_CHUNK_COUNT = 1<<12;
-    private GlBuffer chunkPosBuffer = new GlBuffer(INIT_MAX_CHUNK_COUNT*8);//Stored as ivec2
-    private final Long2IntOpenHashMap chunk2idx = new Long2IntOpenHashMap(INIT_MAX_CHUNK_COUNT);
-    private long[] idx2chunk = new long[INIT_MAX_CHUNK_COUNT];
+public final class ChunkBoundStore implements IBoundStore {
+    private static final int INITIAL_MAX_SECTION_COUNT = 1 << 12;
 
+    private GlBuffer sectionPositionBuffer = new GlBuffer(INITIAL_MAX_SECTION_COUNT * 8L);
+    private final Long2IntOpenHashMap positionToIndex = new Long2IntOpenHashMap(INITIAL_MAX_SECTION_COUNT);
+    private long[] indexToPosition = new long[INITIAL_MAX_SECTION_COUNT];
     private final LongOpenHashSet addQueue = new LongOpenHashSet();
-    private final LongOpenHashSet remQueue = new LongOpenHashSet();
+    private final LongOpenHashSet removeQueue = new LongOpenHashSet();
 
     public ChunkBoundStore() {
-        this.chunk2idx.defaultReturnValue(-1);
+        this.positionToIndex.defaultReturnValue(-1);
     }
 
     public void addSection(long pos) {
-        if (!this.remQueue.remove(pos)) {
+        if (!this.removeQueue.remove(pos)) {
             this.addQueue.add(pos);
         }
     }
 
     public void removeSection(long pos) {
         if (!this.addQueue.remove(pos)) {
-            this.remQueue.add(pos);
+            this.removeQueue.add(pos);
         }
     }
 
-    //Bind and render, changing as little gl state as possible so that the caller may configure how it wants to render
     @Override
     public void preRender(Viewport<?> viewport) {
-        if (!this.remQueue.isEmpty()) {
-            boolean wasEmpty = this.chunk2idx.isEmpty();
-            this.remQueue.forEach(this::_remPos);//TODO: REPLACE WITH SCATTER COMPUTE
-            this.remQueue.clear();
+        if (!this.removeQueue.isEmpty()) {
+            this.removeQueue.forEach(this::removePosition);
+            this.removeQueue.clear();
         }
     }
 
     @Override
     public void postRender(Viewport<?> viewport) {
         if (!this.addQueue.isEmpty()) {
-            this.addQueue.forEach(this::_addPos);//TODO: REPLACE WITH SCATTER COMPUTE
+            this.addQueue.forEach(this::addPosition);
             this.addQueue.clear();
             UploadStream.INSTANCE.commit();
         }
     }
 
-    private void _remPos(long pos) {
-        int idx = this.chunk2idx.remove(pos);
-        if (idx == -1) {
-            Logger.warn("Chunk not in map: " + pos);
+    private void removePosition(long pos) {
+        int index = this.positionToIndex.remove(pos);
+        if (index == -1) {
+            Logger.warn("Section not in bound store: " + pos);
             return;
         }
-        if (idx == this.chunk2idx.size()) {
-            //Dont need to do anything as heap is already compact
+        if (index == this.positionToIndex.size()) {
             return;
         }
-        if (this.idx2chunk[idx] != pos) {
-            throw new IllegalStateException();
+        if (this.indexToPosition[index] != pos) {
+            throw new IllegalStateException("Section bound index map is inconsistent");
         }
 
-        //Move last entry on heap to this index
-        long ePos = this.idx2chunk[this.chunk2idx.size()];// since is already removed size is correct end idx
-        if (this.chunk2idx.put(ePos, idx) == -1) {
-            throw new IllegalStateException();
+        long endPosition = this.indexToPosition[this.positionToIndex.size()];
+        if (this.positionToIndex.put(endPosition, index) == -1) {
+            throw new IllegalStateException("Section bound replacement was missing");
         }
-        this.idx2chunk[idx] = ePos;
-
-        //Put the end pos into the new idx
-        this.put(idx, ePos);
+        this.indexToPosition[index] = endPosition;
+        this.put(index, endPosition);
     }
 
-    private void _addPos(long pos) {
-        if (this.chunk2idx.containsKey(pos)) {
-            Logger.warn("Chunk already in map: " + pos);
+    private void addPosition(long pos) {
+        if (this.positionToIndex.containsKey(pos)) {
+            Logger.warn("Section already in bound store: " + pos);
             return;
         }
-        this.ensureSize1();//Resize if needed
 
-        int idx = this.chunk2idx.size();
-        this.chunk2idx.put(pos, idx);
-        this.idx2chunk[idx] = pos;
-
-        this.put(idx, pos);
+        this.ensureCapacity();
+        int index = this.positionToIndex.size();
+        this.positionToIndex.put(pos, index);
+        this.indexToPosition[index] = pos;
+        this.put(index, pos);
     }
 
-    private void ensureSize1() {
-        if (this.chunk2idx.size() < this.idx2chunk.length) return;
-        //Commit any copies, ensures is synced to new buffer
+    private void ensureCapacity() {
+        if (this.positionToIndex.size() < this.indexToPosition.length) {
+            return;
+        }
+
         UploadStream.INSTANCE.commit();
+        int size = (int) (this.indexToPosition.length * 1.5);
+        Logger.info("Resizing section position buffer to: " + size);
 
-        int size = (int) (this.idx2chunk.length*1.5);
-        Logger.info("Resizing chunk position buffer to: " + size);
-        //Need to resize
-        var old = this.chunkPosBuffer;
-        this.chunkPosBuffer = new GlBuffer(size * 8L);
-        glCopyNamedBufferSubData(old.id, this.chunkPosBuffer.id, 0, 0, old.size());
-        old.free();
-        var old2 = this.idx2chunk;
-        this.idx2chunk = new long[size];
-        System.arraycopy(old2, 0, this.idx2chunk, 0, old2.length);
+        var oldBuffer = this.sectionPositionBuffer;
+        this.sectionPositionBuffer = new GlBuffer(size * 8L);
+        glCopyNamedBufferSubData(oldBuffer.id, this.sectionPositionBuffer.id, 0, 0, oldBuffer.size());
+        oldBuffer.free();
+
+        var oldPositions = this.indexToPosition;
+        this.indexToPosition = new long[size];
+        System.arraycopy(oldPositions, 0, this.indexToPosition, 0, oldPositions.length);
     }
 
-    private void put(int idx, long pos) {
-        long ptr2 = UploadStream.INSTANCE.upload(this.chunkPosBuffer, 8L*idx, 8);
-        //Need to do it in 2 parts because ivec2 is 2 parts
-        putPos(ptr2, pos);
-    }
-    private static void putPos(long ptr, long pos) {
+    private void put(int index, long pos) {
+        long pointer = UploadStream.INSTANCE.upload(this.sectionPositionBuffer, 8L * index, 8);
         pos = IBoundStore.transformBeforeStore(pos);
-        MemoryUtil.memPutInt(ptr, (int)(pos&0xFFFFFFFFL)); ptr += 4;
-        MemoryUtil.memPutInt(ptr, (int)((pos>>>32)&0xFFFFFFFFL));
+        MemoryUtil.memPutInt(pointer, (int) pos);
+        MemoryUtil.memPutInt(pointer + 4, (int) (pos >>> 32));
     }
 
     public void reset() {
-        this.chunk2idx.clear();
+        this.positionToIndex.clear();
     }
 
+    @Override
     public void free() {
-        this.chunkPosBuffer.free();
+        this.sectionPositionBuffer.free();
     }
 
     @Override
     public GlBuffer getBuffer() {
-        return this.chunkPosBuffer;
+        return this.sectionPositionBuffer;
     }
 
     @Override
     public int getCount() {
-        return this.chunk2idx.size();
+        return this.positionToIndex.size();
     }
 }

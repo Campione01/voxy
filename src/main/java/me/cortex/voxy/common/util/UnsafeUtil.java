@@ -52,7 +52,6 @@ public class UnsafeUtil {
     public static void memcpy(long[] src, long dst) {
         UNSAFE.copyMemory(src, LONG_ARRAY_BASE_OFFSET, null, dst, (long) src.length <<3);
     }
-
     public static void memcpy(int[] src, long dst) {
         UNSAFE.copyMemory(src, INT_ARRAY_BASE_OFFSET, null, dst, (long) src.length <<2);
     }

@@ -9,10 +9,10 @@ import org.joml.Vector4f;
 import java.util.Arrays;
 
 public class SoftwareRasterizer {
-    private static final int INTEGER_BITS = 9;//+-512
-    private static final int TOTAL_INTEGER_BITS = INTEGER_BITS+1;
-    private static final int FIXED_POINT_BITS = 32-TOTAL_INTEGER_BITS;
-    private static final long FIXED_POINT_BIT_SCALE = (1<<FIXED_POINT_BITS)-1;
+    private static final int INTEGER_BITS = 9;
+    private static final int TOTAL_INTEGER_BITS = INTEGER_BITS + 1;
+    private static final int FIXED_POINT_BITS = 32 - TOTAL_INTEGER_BITS;
+    private static final long FIXED_POINT_BIT_SCALE = (1 << FIXED_POINT_BITS) - 1;
 
     private final Vector4f scratch = new Vector4f();
 
@@ -49,10 +49,10 @@ public class SoftwareRasterizer {
     private int[] samplerTexture;
 
     public SoftwareRasterizer(int targetSize) {
-        int testExpect = targetSize*targetSize;
-        int testGot = fromFixed2Int(toFixed(targetSize*targetSize));
-        if (testExpect != testGot) {
-            throw new IllegalStateException("Target resolution not supported, not enough precision bits. got: " + testGot + ", expect: "+ testExpect);
+        int expected = targetSize * targetSize;
+        int actual = fromFixedToInt(toFixed(expected));
+        if (expected != actual) {
+            throw new IllegalStateException("Target resolution is not supported by the fixed-point precision: got " + actual + ", expected " + expected);
         }
         this.targetSize = targetSize;
         this.framebuffer = new long[targetSize*targetSize];
@@ -102,16 +102,16 @@ public class SoftwareRasterizer {
 
 
         //0,1,2 | 2,3,0
-        toFixed(this.scratchR1,this.scratch1);
-        toFixed(this.scratchR2,this.scratch2);
-        toFixed(this.scratchR3,this.scratch3);
+        toFixed(this.scratchR1, this.scratch1);
+        toFixed(this.scratchR2, this.scratch2);
+        toFixed(this.scratchR3, this.scratch3);
         this.a1.set(this.qmuv1);
         this.a2.set(this.qmuv2);
         this.a3.set(this.qmuv3);
         this.rasterTriangle(false);
-        toFixed(this.scratchR1,this.scratch3);
-        toFixed(this.scratchR2,this.scratch4);
-        toFixed(this.scratchR3,this.scratch1);
+        toFixed(this.scratchR1, this.scratch3);
+        toFixed(this.scratchR2, this.scratch4);
+        toFixed(this.scratchR3, this.scratch1);
         this.a1.set(this.qmuv3);
         this.a2.set(this.qmuv4);
         this.a3.set(this.qmuv1);
@@ -123,9 +123,7 @@ public class SoftwareRasterizer {
         Vector3i v2 = this.scratchR2;
         Vector3i v3 = this.scratchR3;
 
-        //THIS IS BREAKING FOR SOME REASON
         int area = edge(v1, v2, v3);
-        //fromFixed(area)~==edge(this.scratch3, this.scratch4, this.scratch1)
 
         //Pretty sure this is how you check for winding order aswell (if area is negative its counterclockwise)
         if (area<0 == this.cullBackFace) {
@@ -145,12 +143,11 @@ public class SoftwareRasterizer {
             area = -area;
         }*/
 
-        int minX = fromFixed2Int(Math.max(Math.min(Math.min(v1.x, v2.x), v3.x), 0));
-        int maxX = fromFixed2Int(Math.min(Math.max(Math.max(v1.x, v2.x), v3.x), toFixed(this.targetSize-1)));
-        int minY = fromFixed2Int(Math.max(Math.min(Math.min(v1.y, v2.y), v3.y), 0));
-        int maxY = fromFixed2Int(Math.min(Math.max(Math.max(v1.y, v2.y), v3.y), toFixed(this.targetSize-1)));
+        int minX = fromFixedToInt(Math.max(Math.min(Math.min(v1.x, v2.x), v3.x), 0));
+        int maxX = fromFixedToInt(Math.min(Math.max(Math.max(v1.x, v2.x), v3.x), toFixed(this.targetSize-1)));
+        int minY = fromFixedToInt(Math.max(Math.min(Math.min(v1.y, v2.y), v3.y), 0));
+        int maxY = fromFixedToInt(Math.min(Math.max(Math.max(v1.y, v2.y), v3.y), toFixed(this.targetSize-1)));
 
-        //float invArea = 1.0f/area;
         for (int py = minY; py<=maxY; py++) {
             for (int px = minX; px<=maxX; px++) {
                 int cx = toFixed(px)+toFixed(0.5f);
@@ -158,14 +155,18 @@ public class SoftwareRasterizer {
                 int w1 = fixedDiv(edge(v2, v3, cx, cy), area);
                 int w2 = fixedDiv(edge(v3, v1, cx, cy), area);
                 int w3 = toFixed(1.0f)-w1-w2;
-                if ((w1>0&&w2>0&&w3>0)||(orZero&&w1>=0&&w2>=0&&w3>=0)) {
+                if (w1>=0&&w2>=0&&w3>=0) {
                     //Dont need to worry about perspective correction afak as it should already be all correct
 
                     //pixel is inside the triangle
                     float b1 = fromFixed(w1);
                     float b2 = fromFixed(w2);
                     float b3 = fromFixed(w3);
-                    float z = Math.fma(b1, fromFixed(this.scratchR1.z), Math.fma(b2, fromFixed(this.scratchR2.z), b3 * fromFixed(this.scratchR3.z)));
+                    float z = Math.fma(
+                            b1,
+                            fromFixed(this.scratchR1.z),
+                            Math.fma(b2, fromFixed(this.scratchR2.z), b3 * fromFixed(this.scratchR3.z))
+                    );
                     this.rasterPixel(px+py*this.targetSize, b1, b2, b3, z);
                 }
             }
@@ -185,6 +186,7 @@ public class SoftwareRasterizer {
         float v = Math.fma(b1, this.a1.z, Math.fma(b2, this.a2.z, b3 * this.a3.z));
 
         int colour = this.sampleTexture(u,v);//The ABGR colour of this pixel
+
 
         final int ALPHA_CUTOFF_THRESHOLD = 0;
         //TODO: meta&1 OR if we are blending
@@ -253,50 +255,40 @@ public class SoftwareRasterizer {
         return (cx-a.x)*(b.y-a.y) - (cy-a.y) * (b.x-a.x);
     }
 
-
-
     private static int edge(Vector3i a, Vector3i b, Vector3i c) {
-        return fixedMul(c.x-a.x,b.y-a.y) - fixedMul(c.y-a.y, b.x-a.x);
+        return fixedMul(c.x-a.x, b.y-a.y) - fixedMul(c.y-a.y, b.x-a.x);
     }
 
     private static int edge(Vector3i a, Vector3i b, int cx, int cy) {
-        return fixedMul(cx-a.x,b.y-a.y) - fixedMul(cy-a.y, b.x-a.x);
+        return fixedMul(cx-a.x, b.y-a.y) - fixedMul(cy-a.y, b.x-a.x);
     }
 
-
-
-    private static int toFixed(float a) {
-        return (int) (((double)a)*(double) FIXED_POINT_BIT_SCALE);
+    private static int toFixed(float value) {
+        return (int)(((double)value) * (double)FIXED_POINT_BIT_SCALE);
     }
 
-    private static int toFixed(int a) {
-        return (int) (a*FIXED_POINT_BIT_SCALE);
+    private static int toFixed(int value) {
+        return (int)(value * FIXED_POINT_BIT_SCALE);
     }
 
-    private static void toFixed(Vector3i dst, Vector3f src) {
-        dst.set(toFixed(src.x), toFixed(src.y), toFixed(src.z));
+    private static void toFixed(Vector3i destination, Vector3f source) {
+        destination.set(toFixed(source.x), toFixed(source.y), toFixed(source.z));
     }
 
-    private static float fromFixed(int a) {
-        return (float) (((double)a)/(double)FIXED_POINT_BIT_SCALE);
+    private static float fromFixed(int value) {
+        return (float)(((double)value) / (double)FIXED_POINT_BIT_SCALE);
     }
 
-    private static int fromFixed2Int(int a) {
-        return (int) (a/FIXED_POINT_BIT_SCALE);
-    }
-
-    private static void fromFixed(Vector3f dst, Vector3i src) {
-        dst.set(fromFixed(src.x), fromFixed(src.y), fromFixed(src.z));
+    private static int fromFixedToInt(int value) {
+        return (int)(value / FIXED_POINT_BIT_SCALE);
     }
 
     private static int fixedMul(int a, int b) {
-        //return (int)((Integer.toUnsignedLong(a) * Integer.toUnsignedLong(b)) >>> (64-(FIXED_POINT_BITS*2)));
-        return (int)((((long)a) * ((long)b))/FIXED_POINT_BIT_SCALE);
+        return (int)((((long)a) * ((long)b)) / FIXED_POINT_BIT_SCALE);
     }
 
     private static int fixedDiv(int a, int b) {
-        //return (int)((Integer.toUnsignedLong(a) * Integer.toUnsignedLong(b)) >>> (64-(FIXED_POINT_BITS*2)));
-        return (int)((((long)a)*FIXED_POINT_BIT_SCALE)/(b));
+        return (int)((((long)a) * FIXED_POINT_BIT_SCALE) / b);
     }
 
 

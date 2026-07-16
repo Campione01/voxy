@@ -6,7 +6,6 @@ import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -96,9 +95,12 @@ public class Serialization {
         Map<Class<?>, GsonConfigSerialization<?>> serializers = new HashMap<>();
 
         Set<String> clazzs = new LinkedHashSet<>();
-        var path = FabricLoader.getInstance().getModContainer("voxy").get().getRootPaths().get(0);
-        clazzs.addAll(collectAllClasses(path, BASE_SEARCH_PACKAGE));
-        clazzs.addAll(collectAllClasses(BASE_SEARCH_PACKAGE));
+        Path rootPath = VoxyCommon.getPlatformUtil().getModRootPath("voxy");
+        if (rootPath != null) {
+            clazzs.addAll(collectAllClasses(rootPath, BASE_SEARCH_PACKAGE));
+        } else {
+            Logger.error("Could not locate voxy mod file for class scanning");
+        }
         int count = 0;
         outer:
         for (var clzName : clazzs) {

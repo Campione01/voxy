@@ -1,7 +1,11 @@
-# Project exclude paths
-/.gradle/
-/.idea/
-/build/
-/run/
-/out/
-/logs/
+.gradle/
+build/
+run/
+.idea/
+.vscode/
+.superpowers/
+*.iml
+*.log
+task_plan.md
+findings.md
+progress.md

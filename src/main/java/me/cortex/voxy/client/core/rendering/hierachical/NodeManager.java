@@ -1067,7 +1067,6 @@ public class NodeManager {
     }
 
     //==================================================================================================================
-
     private int _nodeAlreadyInFlightDontSpam = 0;
 
     public void processRequest(long pos) {

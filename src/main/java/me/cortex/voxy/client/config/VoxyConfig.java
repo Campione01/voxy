@@ -8,7 +8,6 @@ import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
 import me.cortex.voxy.commonImpl.VoxyCommon;
-import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.FileReader;
 import java.io.IOException;
@@ -32,9 +31,16 @@ public class VoxyConfig {
     public float sectionRenderDistance = 16;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount()/1.5, 1);
     public float subDivisionSize = 64;
-    public boolean useEnvironmentalFog = true;
+    public int skyFogDistance = 96;
+    public float fogIntensity = 1.0f;
+    public float fogDensity = 0.0f;
+    public boolean adaptCloudDistance = true;
+    public int cloudDistance = 0;
     public boolean dontUseSodiumBuilderThreads = false;
+
     public String ssaoMode;
+
+    public boolean useEnvironmentalFog = true;
 
     public SSAO.SSAOMode getSSAOMode() {
         if (this.ssaoMode == null) return SSAO.SSAOMode.AUTO;
@@ -46,7 +52,6 @@ public class VoxyConfig {
     public void setSSAOMode(SSAO.SSAOMode mode) {
         this.ssaoMode = mode.name().toLowerCase(Locale.ROOT);
     }
-
 
     private static VoxyConfig loadOrCreate() {
         if (VoxyCommon.isAvailable()) {
@@ -67,7 +72,7 @@ public class VoxyConfig {
                 }
                 Logger.info("Error during config loading, creating new");
             } else {
-                Logger.info("Config file doesnt exist, creating new");
+                Logger.info("Config file does not exist, creating new");
             }
             var config = new VoxyConfig();
             config.save();
@@ -94,9 +99,7 @@ public class VoxyConfig {
     }
 
     private static Path getConfigPath() {
-        return FabricLoader.getInstance()
-                .getConfigDir()
-                .resolve("voxy-config.json");
+        return VoxyCommon.getPlatformUtil().getConfigDir().resolve("voxy-config.json");
     }
 
     public boolean isRenderingEnabled() {
