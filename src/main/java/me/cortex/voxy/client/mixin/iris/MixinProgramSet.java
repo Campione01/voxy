@@ -4,6 +4,7 @@ import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.util.IrisUtil;
 import me.cortex.voxy.client.iris.IGetVoxyPatchData;
 import me.cortex.voxy.client.iris.IrisShaderPatch;
+import me.cortex.voxy.common.Logger;
 import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.include.AbsolutePackPath;
 import net.irisshaders.iris.shaderpack.programs.ProgramSet;
@@ -26,8 +27,13 @@ public class MixinProgramSet implements IGetVoxyPatchData {
 
     @Inject(method = "<init>", at = @At(value = "INVOKE", target = "Lnet/irisshaders/iris/shaderpack/programs/ProgramSet;locateDirectives()V", shift = At.Shift.BEFORE))
     private void voxy$injectPatchMaker(AbsolutePackPath directory, Function<AbsolutePackPath, String> sourceProvider, ShaderProperties shaderProperties, ShaderPack pack, CallbackInfo ci) {
-        if (VoxyConfig.CONFIG.isRenderingEnabled() && IrisUtil.SHADER_SUPPORT) {
-            this.patchData = IrisShaderPatch.makePatch(pack, directory, sourceProvider);
+        if (VoxyConfig.CONFIG.isRenderingEnabled() && IrisUtil.SHADER_SUPPORT && IrisUtil.isVoxyMacroActive()) {
+            try {
+                this.patchData = IrisShaderPatch.makePatch(pack, directory, sourceProvider);
+            } catch (RuntimeException e) {
+                this.patchData = null;
+                Logger.error("Voxy shader integration is disabled for this ProgramSet; Iris will continue unchanged", e);
+            }
         }
         /*
         if (this.patchData != null) {

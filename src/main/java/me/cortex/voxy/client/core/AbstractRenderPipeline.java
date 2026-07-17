@@ -1,5 +1,7 @@
 package me.cortex.voxy.client.core;
 
+import com.mojang.blaze3d.platform.GlConst;
+import com.mojang.blaze3d.platform.GlStateManager;
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.VoxyClient;
@@ -92,6 +94,33 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected abstract int setup(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight);
     protected abstract void postOpaquePreTranslucent(Viewport<?> viewport, int sourceFrameBuffer);
+
+    public boolean supportsSourceViewport(int sourceFramebuffer, int x, int y, int width, int height,
+                                          int targetWidth, int targetHeight) {
+        return true;
+    }
+
+    public void clearTextureAndSamplerBindings(int count) {
+        for (int i = 0; i < count; i++) {
+            GlStateManager._activeTexture(GlConst.GL_TEXTURE0 + i);
+            GlStateManager._bindTexture(0);
+            glBindSampler(i, 0);
+        }
+    }
+
+    public void setupOpaqueBlendState() {
+        GlStateManager._disableBlend();
+    }
+
+    public void setupTranslucentBlendState() {
+        GlStateManager._enableBlend();
+        GlStateManager._blendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    }
+
+    public void finishTranslucentBlendState() {
+        GlStateManager._disableBlend();
+    }
+
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         glDisable(GL_STENCIL_TEST);
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
@@ -99,6 +128,9 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     public void runPipeline(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         int depthTexture = this.setup(viewport, sourceFrameBuffer, srcWidth, srcHeight);
+        if (depthTexture == 0) {
+            return;
+        }
 
         var rs = ((AbstractSectionRenderer)this.sectionRenderer);
         GPUTiming.INSTANCE.marker("RO");
@@ -134,6 +166,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     }
 
     protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        this.initDepthStencilFromTexture(depthTexture, targetFb, srcWidth, srcHeight, width, height);
+    }
+
+    protected void initDepthStencilFromTexture(int depthTexture, int targetFb, int srcWidth, int srcHeight, int width, int height) {
         glClearNamedFramebufferfi(targetFb, GL_DEPTH_STENCIL, 0, this.properties.clearDepth(), 1);
         // using blit to copy depth from mismatched depth formats is not portable so instead a full screen pass is performed for a depth copy
         // the mismatched formats in this case is the d32 to d24s8
@@ -150,7 +187,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
 
         this.depthStencilSetup.bind();
-        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
         glBindTextureUnit(0, depthTexture);
         glBindSampler(0, DEPTH_SAMPLER);
         glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);

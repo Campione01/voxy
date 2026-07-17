@@ -11,6 +11,10 @@ import me.cortex.voxy.client.core.rendering.section.backend.AbstractSectionRende
 import me.cortex.voxy.client.core.rendering.util.DepthFramebuffer;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.client.iris.IrisVoxyRenderPipelineData;
+import me.cortex.voxy.client.mixin.iris.IrisRenderSystemAccessor;
+import me.cortex.voxy.common.Logger;
+import net.irisshaders.iris.gl.blending.BlendMode;
+import net.irisshaders.iris.gl.blending.BlendModeOverride;
 import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL30;
@@ -24,9 +28,11 @@ import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
 import static org.lwjgl.opengl.GL45C.*;
 
 public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
+    private static final BlendModeOverride DEFAULT_TRANSLUCENT_BLEND = new BlendModeOverride(
+            new BlendMode(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
     private static final int UNIFORM_BINDING_POINT = 7;
-    private static final int BASE_BUFFER_BINDING_INDEX = 10;
-    private static final int BASE_SAMPLER_BINDING_INDEX = 6;
+    private static final int BASE_BUFFER_BINDING_INDEX = IrisVoxyRenderPipelineData.FORWARDED_SSBO_BINDING_BASE;
+    private static final int BASE_SAMPLER_BINDING_INDEX = IrisVoxyRenderPipelineData.FORWARDED_SAMPLER_BINDING_BASE;
 
     private final IrisVoxyRenderPipelineData data;
     private final FullscreenBlit depthBlit;
@@ -36,13 +42,23 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     private final GlBuffer shaderUniforms;
 
+    private int validatedSourceFramebuffer = -1;
+    private int validatedViewportWidth = -1;
+    private int validatedViewportHeight = -1;
+    private int validatedSamplingWidth = -1;
+    private int validatedSamplingHeight = -1;
+    private int validatedTargetWidth = -1;
+    private int validatedTargetHeight = -1;
+    private int validatedDepthAttachment = -1;
+    private int validatedDepthTexture;
+    private boolean warnedUnsupportedTarget;
+
     public IrisVoxyRenderPipeline(RenderProperties properties, IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, data.shouldDeferTranslucency());
         this.data = data;
         if (this.data.thePipeline != null) {
             throw new IllegalStateException("Pipeline data already bound");
         }
-        this.data.thePipeline = this;
 
         //Bind the drawbuffers
         var oDT = this.data.opaqueDrawTargets;
@@ -77,6 +93,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         }
 
         this.depthBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag");
+        this.data.thePipeline = this;
     }
 
     @Override
@@ -117,9 +134,65 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     }
 
     @Override
+    public boolean supportsSourceViewport(int sourceFramebuffer, int x, int y, int width, int height,
+                                          int targetWidth, int targetHeight) {
+        if (x != 0 || y != 0) {
+            return this.rejectSourceTarget("the active viewport has a non-zero origin");
+        }
+        if (width <= 0 || height <= 0 || targetWidth <= 0 || targetHeight <= 0) {
+            return this.rejectSourceTarget("the active viewport has invalid dimensions");
+        }
+        if (targetWidth > width || targetHeight > height) {
+            return this.rejectSourceTarget("the Voxy render scale is larger than the Iris source viewport");
+        }
+
+        int samplingWidth = this.data.useViewportDims ? width : targetWidth;
+        int samplingHeight = this.data.useViewportDims ? height : targetHeight;
+        return this.getValidatedSourceDepthTexture(sourceFramebuffer, width, height,
+                samplingWidth, samplingHeight, targetWidth, targetHeight) != 0;
+    }
+
+    @Override
+    public void clearTextureAndSamplerBindings(int count) {
+        super.clearTextureAndSamplerBindings(count);
+        int[] irisSamplerBindings = IrisRenderSystemAccessor.voxy$getSamplerBindings();
+        for (int i = 0; i < Math.min(count, irisSamplerBindings.length); i++) {
+            irisSamplerBindings[i] = 0;
+        }
+    }
+
+    @Override
+    public void setupOpaqueBlendState() {
+        BlendModeOverride.OFF.apply();
+    }
+
+    @Override
+    public void setupTranslucentBlendState() {
+        DEFAULT_TRANSLUCENT_BLEND.apply();
+    }
+
+    @Override
+    public void finishTranslucentBlendState() {
+        BlendModeOverride.OFF.apply();
+    }
+
+    @Override
     protected int setup(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight) {
-        this.fb.resize(viewport.width, viewport.height);
-        this.fbTranslucent.resize(viewport.width, viewport.height);
+        int samplingWidth = this.data.useViewportDims ? srcWidth : viewport.width;
+        int samplingHeight = this.data.useViewportDims ? srcHeight : viewport.height;
+        int sourceDepthTexture = this.validatedDepthTexture;
+        if (sourceDepthTexture == 0) {
+            return 0;
+        }
+
+        try {
+            this.fb.resize(viewport.width, viewport.height);
+            this.fbTranslucent.resize(viewport.width, viewport.height);
+        } catch (RuntimeException e) {
+            this.validatedDepthTexture = 0;
+            this.rejectSourceTarget("Voxy could not create compatible views of the Iris render targets", e);
+            return 0;
+        }
 
         if (false) {//TODO: only do this if shader specifies
             //Clear the colour component
@@ -128,12 +201,118 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             glClear(GL_COLOR_BUFFER_BIT);
         }
 
-        if (!this.data.useViewportDims) {
-            srcWidth = viewport.width;
-            srcHeight = viewport.height;
-        }
-        this.initDepthStencil(sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, viewport.width, viewport.height);
+        this.initDepthStencilFromTexture(sourceDepthTexture, this.fb.framebuffer.id, samplingWidth, samplingHeight,
+                viewport.width, viewport.height);
         return this.fb.getDepthTex().id;
+    }
+
+    private int getValidatedSourceDepthTexture(int sourceFramebuffer, int viewportWidth, int viewportHeight,
+                                               int samplingWidth, int samplingHeight, int targetWidth, int targetHeight) {
+        // Iris reattaches its depth texture when render targets are recreated. This is the same
+        // attachment-name query Voxy previously performed per frame; the expensive validation
+        // below remains cached until the attachment or dimensions change.
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFramebuffer, GL_DEPTH_ATTACHMENT,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        if (this.validatedSourceFramebuffer == sourceFramebuffer
+                && this.validatedViewportWidth == viewportWidth
+                && this.validatedViewportHeight == viewportHeight
+                && this.validatedSamplingWidth == samplingWidth
+                && this.validatedSamplingHeight == samplingHeight
+                && this.validatedTargetWidth == targetWidth
+                && this.validatedTargetHeight == targetHeight
+                && this.validatedDepthAttachment == depthTexture) {
+            return this.validatedDepthTexture;
+        }
+
+        this.validatedSourceFramebuffer = sourceFramebuffer;
+        this.validatedViewportWidth = viewportWidth;
+        this.validatedViewportHeight = viewportHeight;
+        this.validatedSamplingWidth = samplingWidth;
+        this.validatedSamplingHeight = samplingHeight;
+        this.validatedTargetWidth = targetWidth;
+        this.validatedTargetHeight = targetHeight;
+        this.validatedDepthAttachment = depthTexture;
+        this.validatedDepthTexture = 0;
+
+        if (depthTexture <= 0) {
+            this.rejectSourceTarget("the active Iris framebuffer has no readable depth texture");
+            return 0;
+        }
+
+        if (glCheckNamedFramebufferStatus(sourceFramebuffer, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            this.rejectSourceTarget("the active Iris framebuffer is incomplete");
+            return 0;
+        }
+
+        int attachmentType = glGetNamedFramebufferAttachmentParameteri(sourceFramebuffer, GL_DEPTH_ATTACHMENT,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE);
+        if (attachmentType != org.lwjgl.opengl.GL11C.GL_TEXTURE) {
+            this.rejectSourceTarget("the active Iris depth attachment is not a texture");
+            return 0;
+        }
+
+        int depthWidth = glGetTextureLevelParameteri(depthTexture, 0, org.lwjgl.opengl.GL11C.GL_TEXTURE_WIDTH);
+        int depthHeight = glGetTextureLevelParameteri(depthTexture, 0, org.lwjgl.opengl.GL11C.GL_TEXTURE_HEIGHT);
+        int depthFormat = glGetTextureLevelParameteri(depthTexture, 0, org.lwjgl.opengl.GL11C.GL_TEXTURE_INTERNAL_FORMAT);
+        if (viewportWidth > depthWidth || viewportHeight > depthHeight
+                || samplingWidth > depthWidth || samplingHeight > depthHeight
+                || targetWidth > depthWidth || targetHeight > depthHeight) {
+            this.rejectSourceTarget("the Iris depth texture is smaller than the sampled Voxy viewport");
+            return 0;
+        }
+        if (!isSupportedDepthFormat(depthFormat)) {
+            this.rejectSourceTarget("the Iris depth texture uses unsupported format 0x" + Integer.toHexString(depthFormat));
+            return 0;
+        }
+        if (!this.areDrawTargetsLargeEnough(this.data.opaqueDrawTargets, targetWidth, targetHeight)
+                || !this.areDrawTargetsLargeEnough(this.data.translucentDrawTargets, targetWidth, targetHeight)) {
+            this.rejectSourceTarget("an Iris colour target is smaller than the Voxy viewport");
+            return 0;
+        }
+
+        this.validatedDepthTexture = depthTexture;
+        return depthTexture;
+    }
+
+    private boolean areDrawTargetsLargeEnough(int[] textures, int width, int height) {
+        for (int texture : textures) {
+            if (texture <= 0
+                    || glGetTextureLevelParameteri(texture, 0, org.lwjgl.opengl.GL11C.GL_TEXTURE_WIDTH) < width
+                    || glGetTextureLevelParameteri(texture, 0, org.lwjgl.opengl.GL11C.GL_TEXTURE_HEIGHT) < height) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isSupportedDepthFormat(int format) {
+        return switch (format) {
+            case org.lwjgl.opengl.GL11C.GL_DEPTH_COMPONENT,
+                    org.lwjgl.opengl.GL14C.GL_DEPTH_COMPONENT16,
+                    org.lwjgl.opengl.GL14C.GL_DEPTH_COMPONENT24,
+                    org.lwjgl.opengl.GL14C.GL_DEPTH_COMPONENT32,
+                    GL_DEPTH_COMPONENT32F,
+                    GL_DEPTH_STENCIL,
+                    GL_DEPTH24_STENCIL8,
+                    GL_DEPTH32F_STENCIL8 -> true;
+            default -> false;
+        };
+    }
+
+    private boolean rejectSourceTarget(String reason) {
+        return this.rejectSourceTarget(reason, null);
+    }
+
+    private boolean rejectSourceTarget(String reason, RuntimeException cause) {
+        if (!this.warnedUnsupportedTarget) {
+            this.warnedUnsupportedTarget = true;
+            if (cause == null) {
+                Logger.warn("Skipping the Voxy Iris sub-pipeline because", reason);
+            } else {
+                Logger.warn("Skipping the Voxy Iris sub-pipeline because", reason, cause);
+            }
+        }
+        return false;
     }
 
     @Override
@@ -167,25 +346,16 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
-        if (this.data.renderToVanillaDepth) {
-            boolean mustAdjustViewport = srcWidth != viewport.width || srcHeight != viewport.height;
-            if (this.data.useViewportDims || !mustAdjustViewport) {
-                glColorMask(false, false, false, false);
-                if (mustAdjustViewport) {
-                    glViewport(0, 0, viewport.width, viewport.height);
-                }
-                AbstractRenderPipeline.transformBlitDepth(
-                        this.depthBlit,
-                        this.fbTranslucent.getDepthTex().id,
-                        sourceFrameBuffer,
-                        viewport,
-                        new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView)
-                );
-                if (mustAdjustViewport) {
-                    glViewport(0, 0, srcWidth, srcHeight);
-                }
-                glColorMask(true, true, true, true);
-            }
+        if (this.data.renderToVanillaDepth && srcWidth == viewport.width && srcHeight == viewport.height) {
+            glColorMask(false, false, false, false);
+            AbstractRenderPipeline.transformBlitDepth(
+                    this.depthBlit,
+                    this.fbTranslucent.getDepthTex().id,
+                    sourceFrameBuffer,
+                    viewport,
+                    new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView)
+            );
+            glColorMask(true, true, true, true);
         } else {
             // normally disabled by AbstractRenderPipeline but since we are skipping it we do it here
             glDisable(GL_STENCIL_TEST);

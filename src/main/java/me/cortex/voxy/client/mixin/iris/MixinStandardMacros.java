@@ -26,7 +26,7 @@ public abstract class MixinStandardMacros {
 
     @WrapOperation(method = "createStandardEnvironmentDefines", at = @At(value = "INVOKE", target = "Lcom/google/common/collect/ImmutableList;copyOf(Ljava/util/Collection;)Lcom/google/common/collect/ImmutableList;"))
     private static ImmutableList<StringPair> voxy$injectVoxyDefine(Collection<StringPair> list, Operation<ImmutableList<StringPair>> original) {
-        if (VoxyConfig.CONFIG.isRenderingEnabled() && IrisUtil.SHADER_SUPPORT) {
+        if (IrisUtil.prepareVoxyMacro(VoxyConfig.CONFIG.isRenderingEnabled())) {
             define((List<StringPair>) list, "VOXY", Integer.toString(IrisShaderPatch.SHADER_DEFINE_VERSION));
             /*
             if (IrisShaderPatch.IMPERSONATE_DISTANT_HORIZONS) {

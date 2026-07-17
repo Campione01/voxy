@@ -7,9 +7,11 @@ import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2ObjectLinkedOpenHashMap;
 import me.cortex.voxy.common.Logger;
+import net.irisshaders.iris.gl.blending.BlendMode;
+import net.irisshaders.iris.gl.blending.BlendModeOverride;
+import net.irisshaders.iris.gl.blending.BufferBlendOverride;
 import net.irisshaders.iris.shaderpack.ShaderPack;
 import net.irisshaders.iris.shaderpack.include.AbsolutePackPath;
-import org.lwjgl.opengl.ARBDrawBuffersBlend;
 
 import java.io.IOException;
 import java.lang.reflect.Modifier;
@@ -38,7 +40,7 @@ public class IrisShaderPatch {
                     ret.put(Integer.parseInt(entry.getKey()), entry.getValue().getAsString());
                 }
             } catch (Exception e) {
-                Logger.error(e);
+                throw new JsonParseException("Invalid Voxy SSBO mapping", e);
             }
             return ret;
         }
@@ -180,6 +182,24 @@ public class IrisShaderPatch {
         public boolean skipShaderDepthHackFix;
         //public boolean deferTranslucentRendering;
         public String checkValid() {
+            if (this.samplers != null && this.samplers.size() > IrisVoxyRenderPipelineData.MAX_FORWARDED_SAMPLER_COUNT) {
+                return "Sampler mapping count " + this.samplers.size() + " exceeds safe limit "
+                        + IrisVoxyRenderPipelineData.MAX_FORWARDED_SAMPLER_COUNT;
+            }
+            if (this.ssbos != null) {
+                int forwardedBufferCount = 0;
+                for (int index : this.ssbos.keySet()) {
+                    if (index == -1) continue;
+                    if (index < 0) {
+                        return "SSBO source index must be non-negative: " + index;
+                    }
+                    forwardedBufferCount++;
+                }
+                if (forwardedBufferCount > IrisVoxyRenderPipelineData.MAX_FORWARDED_SSBO_COUNT) {
+                    return "SSBO mapping count " + forwardedBufferCount + " exceeds safe limit "
+                            + IrisVoxyRenderPipelineData.MAX_FORWARDED_SSBO_COUNT;
+                }
+            }
             if (this.blending != null) {
                 int i = 0;
                 for (BlendState state : this.blending.values()) {
@@ -280,28 +300,27 @@ public class IrisShaderPatch {
         if (this.patchData.blending == null || this.patchData.blending.isEmpty()) {
             return ()->{};//No blending change
         }
+        var initialState = this.patchData.blending.getOrDefault(-1, null);
+        BlendModeOverride initialOverride = null;
+        if (initialState != null) {
+            initialOverride = initialState.off()
+                    ? BlendModeOverride.OFF
+                    : new BlendModeOverride(new BlendMode(initialState.sRGB(), initialState.dRGB(), initialState.sA(), initialState.dA()));
+        }
+        List<BufferBlendOverride> bufferOverrides = new java.util.ArrayList<>();
+        for (var entry : this.patchData.blending.int2ObjectEntrySet()) {
+            if (entry.getIntKey() == -1 || entry.getValue() == null) continue;
+            var state = entry.getValue();
+            var blendMode = state.off() ? null : new BlendMode(state.sRGB(), state.dRGB(), state.sA(), state.dA());
+            bufferOverrides.add(new BufferBlendOverride(state.buffer(), blendMode));
+        }
+        var finalInitialOverride = initialOverride;
         return ()->{
-            final var BS = this.patchData.blending;
-            //Set inital state
-            var init = BS.getOrDefault(-1, null);
-            if (init != null) {
-                if (init.off) {
-                    glDisable(GL_BLEND);
-                } else {
-                    glEnable(GL_BLEND);
-                    glBlendFuncSeparate(init.sRGB, init.dRGB, init.sA, init.dA);
-                }
+            if (finalInitialOverride != null) {
+                finalInitialOverride.apply();
             }
-            for (var entry:BS.int2ObjectEntrySet()) {
-                if (entry.getIntKey() == -1) continue;
-                final var s = entry.getValue();
-                if (s.off) {
-                    glDisablei(GL_BLEND, s.buffer);
-                } else {
-                    glEnablei(GL_BLEND, s.buffer);
-                    //_sigh_ thanks nvidia
-                    ARBDrawBuffersBlend.glBlendFuncSeparateiARB(s.buffer, s.sRGB, s.dRGB, s.sA, s.dA);
-                }
+            for (var override : bufferOverrides) {
+                override.apply();
             }
         };
     }

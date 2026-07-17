@@ -6,7 +6,9 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 
 import me.cortex.voxy.client.core.model.ModelFactory;
+import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.UnsafeUtil;
+import net.caffeinemc.mods.sodium.client.services.PlatformModelAccess;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.RenderType;
@@ -18,7 +20,6 @@ import net.minecraft.world.level.BlockAndTintGetter;
 import net.minecraft.world.level.ColorResolver;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -37,6 +38,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -56,6 +58,7 @@ public class SoftwareModelTextureBakery {
     private final ReuseVertexConsumer opaqueVC = new ReuseVertexConsumer();
     private final ReuseVertexConsumer translucentVC = new ReuseVertexConsumer(1/*has discard*/);
     private final SoftwareRasterizer rasterizer = new SoftwareRasterizer(ModelFactory.MODEL_TEXTURE_SIZE);
+    private final java.util.Set<String> warnedUnsupportedModels = ConcurrentHashMap.newKeySet();
 
 
     public SoftwareModelTextureBakery() {
@@ -95,23 +98,73 @@ public class SoftwareModelTextureBakery {
         this.rasterizer.setSamplerTexture(pixels, width, height);
     }
 
-    private void bakeBlockModel(BlockState state, RenderType layer) {
+    private boolean bakeBlockModel(BlockState state) {
         if (state.getRenderShape() == RenderShape.INVISIBLE) {
-            return;// Dont bake if invisible
+            return true;// Dont bake if invisible
         }
         var model = Minecraft.getInstance()
                 .getModelManager()
                 .getBlockModelShaper()
                 .getBlockModel(state);
 
-        for (Direction direction : new Direction[] { Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH,
-                Direction.WEST, Direction.EAST, null }) {
-            var quads = model.getQuads(state, direction, new SingleThreadedRandomSource(42L));
-            for (var quad : quads) {
-                (layer == RenderType.translucent() ? this.translucentVC : this.opaqueVC)
-                        .quad(quad, state.is(BlockTags.LEAVES), layer);
+        var modelAccess = PlatformModelAccess.getInstance();
+        var modelData = modelAccess.getEmptyModelData();
+        Iterable<RenderType> renderTypes;
+        try {
+            // A Voxy model is shared by every position, so positional ModelData cannot be represented safely.
+            // Empty model data gives static NeoForge models the same layer-aware path Sodium uses.
+            renderTypes = modelAccess.getModelRenderTypes(null, model, state, BlockPos.ZERO,
+                    new SingleThreadedRandomSource(42L), modelData);
+        } catch (RuntimeException e) {
+            return this.rejectUnsupportedModel(state, "failed to enumerate render types", e);
+        }
+        if (renderTypes == null) {
+            return this.rejectUnsupportedModel(state, "returned no render type collection", null);
+        }
+
+        boolean foundRenderType = false;
+        try {
+            for (RenderType layer : renderTypes) {
+                ReuseVertexConsumer target;
+                if (layer == RenderType.solid() || layer == RenderType.cutout() || layer == RenderType.cutoutMipped()) {
+                    target = this.opaqueVC;
+                } else if (layer == RenderType.translucent() || layer == RenderType.tripwire()) {
+                    target = this.translucentVC;
+                } else {
+                    return this.rejectUnsupportedModel(state, "uses unsupported render type " + layer, null);
+                }
+                foundRenderType = true;
+
+                for (Direction direction : new Direction[] { Direction.DOWN, Direction.UP, Direction.NORTH,
+                        Direction.SOUTH, Direction.WEST, Direction.EAST, null }) {
+                    var quads = modelAccess.getQuads(null, BlockPos.ZERO, model, state, direction,
+                            new SingleThreadedRandomSource(42L), layer, modelData);
+                    if (quads == null) {
+                        return this.rejectUnsupportedModel(state, "returned null quads for render type " + layer, null);
+                    }
+                    for (var quad : quads) {
+                        target.quad(quad, state.is(BlockTags.LEAVES), layer);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            return this.rejectUnsupportedModel(state, "failed while reading layer-aware quads", e);
+        }
+        return foundRenderType || this.rejectUnsupportedModel(state, "declared no render types", null);
+    }
+
+    private boolean rejectUnsupportedModel(BlockState state, String reason, RuntimeException cause) {
+        this.opaqueVC.reset();
+        this.translucentVC.reset();
+        String key = state.getBlock() + ":" + reason;
+        if (this.warnedUnsupportedModels.add(key)) {
+            if (cause == null) {
+                Logger.warn("Skipping unsafe LOD model for", state, "because it", reason);
+            } else {
+                Logger.warn("Skipping unsafe LOD model for", state, "because it", reason, cause);
             }
         }
+        return false;
     }
 
     private void bakeFluidState(BlockState state, int face, RenderType layer) {
@@ -224,16 +277,8 @@ public class SoftwareModelTextureBakery {
             isBlock = false;
         }
 
-        RenderType blockRenderLayer = null;
-        if (state.getBlock() instanceof LiquidBlock) {
-            blockRenderLayer = ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
-        } else {
-            if (state.getBlock() instanceof LeavesBlock) {
-                blockRenderLayer = RenderType.solid();
-            } else {
-                blockRenderLayer = ItemBlockRenderTypes.getChunkRenderType(state);
-            }
-        }
+        // Fluids still use the vanilla layer because they have a dedicated tessellation path.
+        RenderType fluidRenderLayer = isBlock ? null : ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
 
         // TODO: support block model entities
         // BakedBlockEntityModel bbem = null;
@@ -248,7 +293,7 @@ public class SoftwareModelTextureBakery {
         if (isBlock) {
             this.opaqueVC.reset();
             this.translucentVC.reset();
-            this.bakeBlockModel(state, blockRenderLayer);
+            this.bakeBlockModel(state);
             isAnyShaded |= this.opaqueVC.anyShaded | this.translucentVC.anyShaded;
             isAnyDarkend |= this.opaqueVC.anyDarkendTex | this.translucentVC.anyDarkendTex;
             anyTranslucent |= !this.translucentVC.isEmpty();
@@ -273,7 +318,7 @@ public class SoftwareModelTextureBakery {
             for (int i = 0; i < VIEWS.length; i++) {
                 this.opaqueVC.reset();
                 this.translucentVC.reset();
-                this.bakeFluidState(state, i, blockRenderLayer);
+                this.bakeFluidState(state, i, fluidRenderLayer);
                 if (this.opaqueVC.isEmpty() && this.translucentVC.isEmpty())
                     continue;
                 isAnyShaded |= this.opaqueVC.anyShaded | this.translucentVC.anyShaded;

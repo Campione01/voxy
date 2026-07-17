@@ -3,6 +3,7 @@ package me.cortex.voxy.client.mixin.minecraft;
 import me.cortex.voxy.client.VoxyClientInstance;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
+import me.cortex.voxy.client.core.RenderPipelineFactory;
 import me.cortex.voxy.client.core.VoxyRenderSystem;
 import me.cortex.voxy.client.core.util.IrisUtil;
 import me.cortex.voxy.common.Logger;
@@ -72,6 +73,10 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
             Logger.error("Not creating renderer due to null world");
             return;
         }
+        if (IrisUtil.irisShaderPackEnabled() && !RenderPipelineFactory.isIrisPipelineAvailable()) {
+            Logger.warn("Voxy rendering is disabled for this world because the active Iris pipeline has no safe Voxy integration");
+            return;
+        }
         var instance = (VoxyClientInstance)VoxyCommon.getInstance();
         if (instance == null) {
             Logger.info("Not creating renderer due to null or disabled instance");
@@ -86,7 +91,8 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
             this.renderer = new VoxyRenderSystem(world, instance.getServiceManager());
         } catch (RuntimeException e) {
             if (IrisUtil.irisShaderPackEnabled()) {
-                IrisUtil.disableIrisShaders();
+                this.renderer = null;
+                Logger.error("Failed to create the Voxy Iris renderer; Voxy rendering is disabled for this world", e);
             } else {
                 throw e;
             }

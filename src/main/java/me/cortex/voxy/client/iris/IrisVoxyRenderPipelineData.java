@@ -7,14 +7,17 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectFunction;
 import kroppeb.stareval.function.FunctionReturn;
 import kroppeb.stareval.function.Type;
 import me.cortex.voxy.client.core.IrisVoxyRenderPipeline;
+import me.cortex.voxy.client.core.VoxyRenderSystem;
 import me.cortex.voxy.client.core.rendering.util.LightMapHelper;
 import me.cortex.voxy.client.mixin.iris.CustomUniformsAccessor;
 import me.cortex.voxy.client.mixin.iris.IrisRenderingPipelineAccessor;
 import me.cortex.voxy.common.Logger;
+import net.irisshaders.iris.gl.IrisRenderSystem;
 import net.irisshaders.iris.gl.buffer.ShaderStorageBufferHolder;
 import net.irisshaders.iris.gl.image.ImageHolder;
 import net.irisshaders.iris.gl.sampler.GlSampler;
 import net.irisshaders.iris.gl.sampler.SamplerHolder;
+import net.irisshaders.iris.gl.sampler.SamplerLimits;
 import net.irisshaders.iris.gl.state.FogMode;
 import net.irisshaders.iris.gl.state.ValueUpdateNotifier;
 import net.irisshaders.iris.gl.texture.InternalTextureFormat;
@@ -33,12 +36,17 @@ import java.util.*;
 import java.util.function.*;
 import java.util.stream.Collectors;
 
-import static org.lwjgl.opengl.ARBDirectStateAccess.glBindTextureUnit;
 import static org.lwjgl.opengl.ARBUniformBufferObject.glBindBufferBase;
-import static org.lwjgl.opengl.GL33C.glBindSampler;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
 
 public class IrisVoxyRenderPipelineData {
+    public static final int FORWARDED_SSBO_BINDING_BASE = 6;
+    public static final int MAX_FORWARDED_SSBO_COUNT = VoxyRenderSystem.RESTORED_SSBO_BINDING_COUNT
+            - FORWARDED_SSBO_BINDING_BASE;
+    public static final int FORWARDED_SAMPLER_BINDING_BASE = 6;
+    public static final int MAX_FORWARDED_SAMPLER_COUNT = VoxyRenderSystem.CLEARED_TEXTURE_BINDING_COUNT
+            - FORWARDED_SAMPLER_BINDING_BASE;
+
     public IrisVoxyRenderPipeline thePipeline;
     public final int[] opaqueDrawTargets;
     public final int[] translucentDrawTargets;
@@ -95,12 +103,13 @@ public class IrisVoxyRenderPipelineData {
 
 
     public static IrisVoxyRenderPipelineData buildPipeline(IrisRenderingPipeline ipipe, IrisShaderPatch patch, CustomUniforms cu, ShaderStorageBufferHolder ssboHolder) {
+        var ssbos = patch.getSSBOs();
         var uniforms = createUniformLayoutStructAndUpdater(createUniformSet(cu, patch));
 
 
         var imageSet = createImageSet(ipipe, patch);
 
-        var ssboSet = createSSBOLayouts(patch.getSSBOs(), ssboHolder);
+        var ssboSet = createSSBOLayouts(ssbos, ssboHolder);
 
         var opaqueDrawTargets = getDrawBuffers(patch.getOpqaueTargets(), ipipe.getFlippedAfterPrepare(), ((IrisRenderingPipelineAccessor)ipipe).getRenderTargets());
         var translucentDrawTargets = getDrawBuffers(patch.getTranslucentTargets(), ipipe.getFlippedAfterPrepare(), ((IrisRenderingPipelineAccessor)ipipe).getRenderTargets());
@@ -428,7 +437,7 @@ public class IrisVoxyRenderPipelineData {
         return uniforms;
     }
 
-    private record TextureWSampler(String name, IntSupplier texture, int sampler) { }
+    private record TextureWSampler(String name, TextureType type, IntSupplier texture, int sampler) { }
     public record ImageSet(String layout, IntConsumer bindingFunction) {
 
     }
@@ -478,7 +487,7 @@ public class IrisVoxyRenderPipelineData {
             @Override
             public boolean addDynamicSampler(TextureType type, IntSupplier texture, ValueUpdateNotifier notifier, GlSampler sampler, String... names) {
                 if (!this.hasSampler(names)) return false;
-                samplerSet.add(new TextureWSampler(this.name(names), texture, sampler!=null?sampler.getId():-1));
+                samplerSet.add(new TextureWSampler(this.name(names), type, texture, sampler!=null?sampler.getId():0));
                 return true;
             }
 
@@ -488,9 +497,9 @@ public class IrisVoxyRenderPipelineData {
                 var name = this.name(names);
                 var ex = externalTextures.get(name);
                 if (ex != null) {
-                    samplerSet.add(new TextureWSampler(name, ex, 0));//unbind any sampler and use the externalTextureSupplier
+                    samplerSet.add(new TextureWSampler(name, TextureType.TEXTURE_2D, ex, 0));
                 } else {
-                    samplerSet.add(new TextureWSampler(name, () -> texture, -1));
+                    samplerSet.add(new TextureWSampler(name, TextureType.TEXTURE_2D, () -> texture, 0));
                 }
             }
         };
@@ -514,6 +523,11 @@ public class IrisVoxyRenderPipelineData {
         if (samplerSet.size() != samplerNameSet.size()) {
             Logger.error("Did not find all requested samplers. Found [" + samplerSet.stream().map(a->a.name).collect(Collectors.joining(", ")) + "] expected " + samplerNameSet);
         }
+        if (samplerSet.size() > MAX_FORWARDED_SAMPLER_COUNT) {
+            throw new IllegalArgumentException("Voxy requested " + samplerSet.size()
+                    + " forwarded samplers, but only " + MAX_FORWARDED_SAMPLER_COUNT
+                    + " protected bindings are available");
+        }
 
         //TODO: generate a layout (defines) for all the samplers with the correct types
 
@@ -533,11 +547,8 @@ public class IrisVoxyRenderPipelineData {
             for (int j = 0; j < samplers.length; j++) {
                 int unit = j+base;
                 var ts = samplers[j];
-                glBindTextureUnit(unit, ts.texture.getAsInt());
-                int sampler = ts.sampler;
-                if (sampler != -1) {
-                    glBindSampler(unit, sampler);
-                }//TODO: might need to bind sampler 0
+                IrisRenderSystem.bindTextureToUnit(ts.type.getGlType(), unit, ts.texture.getAsInt());
+                IrisRenderSystem.bindSamplerToUnit(unit, ts.sampler);
             }
         };
         return new ImageSet(builder.toString(), bindingFunction);
@@ -546,17 +557,37 @@ public class IrisVoxyRenderPipelineData {
     public record SSBOSet(String layout, IntConsumer bindingFunction){}
     private record SSBOBinding(int irisIndex, int bindingOffset) {}
     private static SSBOSet createSSBOLayouts(Int2ObjectMap<String> ssbos, ShaderStorageBufferHolder ssboStore) {
-        if (ssboStore == null) return null;//If there is no store, there cannot be any ssbos
         if (ssbos.isEmpty()) return null;
         String header = "";
         if (ssbos.containsKey(-1)) header = ssbos.remove(-1);
+        if (ssbos.size() > MAX_FORWARDED_SSBO_COUNT) {
+            throw new IllegalArgumentException("Voxy requested " + ssbos.size()
+                    + " forwarded SSBOs, but only " + MAX_FORWARDED_SSBO_COUNT + " protected bindings are available");
+        }
+        if (!ssbos.isEmpty() && ssboStore == null) {
+            throw new IllegalArgumentException("Voxy requested Iris SSBOs, but the Iris pipeline has no SSBO holder");
+        }
+        int requiredBindingCount = FORWARDED_SSBO_BINDING_BASE + ssbos.size();
+        if (requiredBindingCount > SamplerLimits.get().getMaxShaderStorageUnits()) {
+            throw new IllegalArgumentException("Voxy requires " + requiredBindingCount
+                    + " SSBO binding points, but the driver exposes " + SamplerLimits.get().getMaxShaderStorageUnits());
+        }
         StringBuilder builder = new StringBuilder(header);
         builder.append("\n");
         SSBOBinding[] bindings = new SSBOBinding[ssbos.size()];
         int i = 0;
         for (var entry : ssbos.int2ObjectEntrySet()) {
             var val = entry.getValue();
-            bindings[i] = new SSBOBinding(entry.getIntKey(), i);
+            int irisIndex = entry.getIntKey();
+            if (irisIndex < 0) {
+                throw new IllegalArgumentException("Invalid Iris SSBO index " + irisIndex);
+            }
+            try {
+                ssboStore.getBufferIndex(irisIndex);
+            } catch (RuntimeException e) {
+                throw new IllegalArgumentException("Voxy requested missing Iris SSBO index " + irisIndex, e);
+            }
+            bindings[i] = new SSBOBinding(irisIndex, i);
             builder.append("layout(binding = (BUFFER_BINDING_INDEX_BASE+").append(i).append(")) restrict buffer IrisBufferBinding").append(i);
             builder.append(" ").append(val).append(";\n");
             i++;

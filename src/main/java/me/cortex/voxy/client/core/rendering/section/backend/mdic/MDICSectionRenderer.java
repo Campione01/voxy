@@ -188,7 +188,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
 
         glDisable(GL_CULL_FACE);
-        glDisable(GL_BLEND);
+        this.pipeline.setupOpaqueBlendState();
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(this.properties.closerEqualDepthCompare());
         this.terrainShader.bind();
@@ -230,8 +230,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     public void renderTranslucent(MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
 
-        glEnable(GL_BLEND);
-        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        this.pipeline.setupTranslucentBlendState();
 
         glDisable(GL_CULL_FACE);
         glEnable(GL_DEPTH_TEST);
@@ -252,7 +251,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         glBindSampler(1, 0);
         glBindTextureUnit(1, 0);
 
-        glDisable(GL_BLEND);
+        this.pipeline.finishTranslucentBlendState();
     }
 
     @Override

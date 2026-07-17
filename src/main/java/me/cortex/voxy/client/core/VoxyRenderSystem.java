@@ -60,6 +60,9 @@ import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_BINDING;
 
 public class VoxyRenderSystem {
+    public static final int RESTORED_SSBO_BINDING_COUNT = 10;
+    public static final int CLEARED_TEXTURE_BINDING_COUNT = 12;
+
     private final WorldEngine worldIn;
 
 
@@ -80,6 +83,7 @@ public class VoxyRenderSystem {
 
     private final AbstractRenderPipeline pipeline;
     private final RenderProperties properties;
+    private boolean warnedDefaultFramebuffer;
 
     // Fog parameters captured before modification by MixinFogRenderer, for Voxy's own fog pass
     private float capturedFogStart;
@@ -116,7 +120,7 @@ public class VoxyRenderSystem {
         }
 
         //Fking HATE EVERYTHING AAAAAAAAAAAAAAAA
-        int[] oldBufferBindings = new int[10];
+        int[] oldBufferBindings = new int[RESTORED_SSBO_BINDING_COUNT];
         for (int i = 0; i < oldBufferBindings.length; i++) {
             oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
         }
@@ -190,11 +194,7 @@ public class VoxyRenderSystem {
             glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
         }
 
-        for (int i = 0; i < 12; i++) {
-            GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
-            GlStateManager._bindTexture(0);
-            glBindSampler(i, 0);
-        }
+        this.pipeline.clearTextureAndSamplerBindings(CLEARED_TEXTURE_BINDING_COUNT);
     }
 
 
@@ -256,6 +256,22 @@ public class VoxyRenderSystem {
             return;//Only render on valid viewport
         }
 
+        int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        if (oldFB == 0) {
+            if (!this.warnedDefaultFramebuffer) {
+                this.warnedDefaultFramebuffer = true;
+                Logger.warn("Skipping Voxy rendering because the active draw framebuffer has no readable attachment");
+            }
+            return;
+        }
+
+        int[] dims = new int[4];
+        glGetIntegerv(GL_VIEWPORT, dims);
+        if (!this.pipeline.supportsSourceViewport(oldFB, dims[0], dims[1], dims[2], dims[3],
+                viewport.width, viewport.height)) {
+            return;
+        }
+
         TimingStatistics.resetSamplers();
 
         TimingStatistics.all.start();
@@ -263,26 +279,17 @@ public class VoxyRenderSystem {
         TimingStatistics.main.start();
 
         //TODO: optimize
-        int[] oldBufferBindings = new int[10];
+        int[] oldBufferBindings = new int[RESTORED_SSBO_BINDING_COUNT];
         for (int i = 0; i < oldBufferBindings.length; i++) {
             oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
         }
 
-
-        int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
         int boundFB = oldFB;
-
-        int[] dims = new int[4];
-        glGetIntegerv(GL_VIEWPORT, dims);
 
         glViewport(0,0, viewport.width, viewport.height);
 
         //var target = DefaultTerrainRenderPasses.CUTOUT.getTarget();
         //boundFB = ((net.minecraft.client.texture.GlTexture) target.getColorAttachment()).getOrCreateFramebuffer(((GlBackend) RenderSystem.getDevice()).getFramebufferManager(), target.getDepthAttachment());
-        if (boundFB == 0) {
-            throw new IllegalStateException("Cannot use the default framebuffer as cannot source from it");
-        }
-
         //this.autoBalanceSubDivSize();
 
         this.pipeline.preSetup(viewport);
@@ -345,14 +352,7 @@ public class VoxyRenderSystem {
 
             GlStateManager._glBindVertexArray(0);//Clear binding
 
-            GlStateManager._activeTexture(GlConst.GL_TEXTURE1);
-            for (int i = 0; i < 12; i++) {
-                GlStateManager._activeTexture(GlConst.GL_TEXTURE0+i);
-                GlStateManager._bindTexture(0);
-                glBindSampler(i, 0);
-            }
-
-            IrisUtil.clearIrisSamplers();//Thanks iris (sigh)
+            this.pipeline.clearTextureAndSamplerBindings(CLEARED_TEXTURE_BINDING_COUNT);
 
             //TODO: should/needto actually restore all of these, not just clear them
             //Clear all the bindings
